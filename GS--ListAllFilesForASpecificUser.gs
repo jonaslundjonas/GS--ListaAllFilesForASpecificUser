@@ -37,6 +37,7 @@
 
 var MONTH_LIMIT = 3; // Number of months to go back from today's date with the created date
 var SPECIFIC_USER = 'jonas.lund@academedia.se'; // Email of the specific user
+var SCRIPT_PROPERTIES = PropertiesService.getScriptProperties(); // Script properties to store last processed file ID
 
 // Function to create a custom menu in the Google Sheets UI
 function onOpen() {
@@ -62,7 +63,9 @@ function startListingFiles() {
   // Freeze the first row
   sheet.setFrozenRows(1);
 
-  listFiles(); // Call the function to list files
+  SCRIPT_PROPERTIES.deleteAllProperties(); // Reset all properties
+
+  listFiles();
 }
 
 // Function to continue listing files if the process was interrupted
@@ -85,7 +88,13 @@ function listFiles() {
   
   var files = [];
   var pageToken = null;
-  
+  var processedCount = parseInt(SCRIPT_PROPERTIES.getProperty('processedCount')) || 0;
+  var totalProcessedCount = 0;
+  var lastProcessedFileId = SCRIPT_PROPERTIES.getProperty('lastProcessedFileId');
+  var currentDate = new Date();
+  var pastDate = new Date();
+  pastDate.setMonth(currentDate.getMonth() - MONTH_LIMIT);
+
   // Retrieve files in a paginated manner
   do {
     var response = Drive.Files.list({
@@ -93,40 +102,49 @@ function listFiles() {
       pageToken: pageToken,
       fields: "nextPageToken, files(id, name, mimeType, owners, createdTime, modifiedTime)"
     });
-    
-    files = files.concat(response.files);
+
+    if (lastProcessedFileId) {
+      var startIndex = response.files.findIndex(file => file.id === lastProcessedFileId);
+      if (startIndex >= 0) {
+        files = response.files.slice(startIndex + 1);
+        lastProcessedFileId = null; // Reset lastProcessedFileId after starting from the correct index
+      }
+    } else {
+      files = response.files;
+    }
+
+    for (var i = 0; i < files.length; i++) {
+      var file = files[i];
+      var createdTime = new Date(file.createdTime);
+      var modifiedTime = new Date(file.modifiedTime);
+      var modifiedInPeriod = modifiedTime >= pastDate;
+      var createdMoreThan3MonthsAgo = createdTime < pastDate;
+      var createdMoreThan3MonthsAgoAndModifiedRecently = createdMoreThan3MonthsAgo && modifiedInPeriod;
+      var shareInfo = getShareInfo(file.id);
+      
+      var row = [
+        file.name,
+        SPECIFIC_USER,
+        file.id,
+        file.modifiedTime,
+        file.owners[0].emailAddress,
+        file.mimeType,
+        file.createdTime,
+        modifiedInPeriod ? "Yes" : "No",
+        createdMoreThan3MonthsAgoAndModifiedRecently ? "Yes" : "No",
+        shareInfo.sharedWithOthers ? "Yes" : "No",
+        shareInfo.numberOfShares
+      ];
+      sheet.appendRow(row);
+
+      SCRIPT_PROPERTIES.setProperty('lastProcessedFileId', file.id); // Store the last processed file ID
+      totalProcessedCount++;
+    }
+
     pageToken = response.nextPageToken;
   } while (pageToken);
 
-  var currentDate = new Date();
-  var pastDate = new Date();
-  pastDate.setMonth(currentDate.getMonth() - MONTH_LIMIT);
-
-  // Process each file and append the data to the sheet
-  for (var i = 0; i < files.length; i++) {
-    var file = files[i];
-    var createdTime = new Date(file.createdTime);
-    var modifiedTime = new Date(file.modifiedTime);
-    var modifiedInPeriod = modifiedTime >= pastDate;
-    var createdMoreThan3MonthsAgo = createdTime < pastDate;
-    var createdMoreThan3MonthsAgoAndModifiedRecently = createdMoreThan3MonthsAgo && modifiedInPeriod;
-    var shareInfo = getShareInfo(file.id);
-    
-    var row = [
-      file.name,
-      SPECIFIC_USER,
-      file.id,
-      file.modifiedTime,
-      file.owners[0].emailAddress,
-      file.mimeType,
-      file.createdTime,
-      modifiedInPeriod ? "Yes" : "No",
-      createdMoreThan3MonthsAgoAndModifiedRecently ? "Yes" : "No",
-      shareInfo.sharedWithOthers ? "Yes" : "No",
-      shareInfo.numberOfShares
-    ];
-    sheet.appendRow(row);
-  }
+  SCRIPT_PROPERTIES.setProperty('processedCount', processedCount + totalProcessedCount); // Update the processed count
 }
 
 // Function to get sharing information for a file
